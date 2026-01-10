@@ -1,0 +1,33 @@
+{
+  "cniVersion": "1.0.0",
+  "interfaces": [
+    {
+      "name": "cni0",
+      "mac": "00:11:22:33:44:55"
+    },
+    {
+      "name": "veth1234",
+      "mac": "aa:bb:cc:dd:ee:ff"
+    },
+    {
+      "name": "eth0",
+      "mac": "12:34:56:78:9a:bc",
+      "sandbox": "/var/run/netns/container123"
+    }
+  ],
+  "ips": [
+    {
+      "version": "4",
+      "interface": 2,
+      "address": "10.244.0.5/16",
+      "gateway": "10.244.0.1"
+    }
+  ],
+  "routes": [
+    {
+      "dst": "0.0.0.0/0",
+      "gw": "10.244.0.1"
+    }
+  ],
+  "dns": {}
+}
