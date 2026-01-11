@@ -86,7 +86,8 @@ docker exec kind-control-plane chmod +x /opt/cni/bin/mascni
 
 # 4. 拷贝配置文件 (关键！)
 # Kubelet 会监控 /etc/cni/net.d/ 目录，并加载字典序第一的配置文件。
-docker cp 10-mascni-new.conf kind-control-plane:/etc/cni/net.d/10-mascni-new.conf
+# 我们必须用 00- 开头，确保排在 Kindnet (10-kindnet.conflist) 之前！
+docker cp 10-mascni-new.conf kind-control-plane:/etc/cni/net.d/00-mascni.conf
 ```
 
 ## 4. 安装运行时依赖 (Install Runtime Deps)

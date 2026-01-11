@@ -80,7 +80,7 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
 
     // 5. Configure Container Interface (Inside NetNS)
     // 切换进程的视角进入 Pod 的网络命名空间，进行内部网络配置。
-    netns::with_netns(&netns_path, || {
+    let container_mac = netns::with_netns(&netns_path, || {
         // a. Rename temp name to CNI_IFNAME (eth0)
         // 将临时的 veth 名字重命名为 K8s 期望的标准名字（通常是 eth0）。
         let status = std::process::Command::new("ip")
@@ -114,7 +114,10 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
             }
         }
 
-        Ok(())
+        // e. Get MAC address
+        let mac = netlink::get_mac_address(&ifname)?;
+
+        Ok(mac)
     })?;
 
     // 6. Configure Host Interface (Host Side)
@@ -185,6 +188,14 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
                         eprintln!("Warn: Failed to update BPF map: {}", e);
                     } else {
                         eprintln!("Rust CNI: Route added {} -> ifindex {}", ip_addr, idx);
+                    }
+
+                    // 3. Update ARP Map (Register MAC)
+                    // 这样当别人想发包给我们时，eBPF 可以查到我们的 MAC 并替换以太网头。
+                    if let Err(e) = loader::register_arp(ip_addr, &container_mac) {
+                        eprintln!("Warn: Failed to update ARP map: {}", e);
+                    } else {
+                        eprintln!("Rust CNI: ARP entry added {} -> {}", ip_addr, container_mac);
                     }
                 }
                 Err(e) => eprintln!("Warn: Failed to get ifindex: {}", e),

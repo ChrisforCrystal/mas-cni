@@ -14,6 +14,15 @@ struct {
     __type(value, __u32); // Target Interface Index
 } routes SEC(".maps");
 
+// NEW: ARP Table (IP -> MAC)
+// 为了解决 L2 问题，我们必须知道目标 Pod 的真实 MAC 地址。
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u32);             // Destination IP
+    __type(value, unsigned char[6]);// Target MAC (6 bytes)
+} arp_table SEC(".maps");
+
 SEC("tc_ingress")
 int tc_redirect(struct __sk_buff *skb) {
     // 0. 数据指针准备
@@ -46,8 +55,26 @@ int tc_redirect(struct __sk_buff *skb) {
     __u32 dest_ip = ip->daddr;
     __u32 *ifindex = bpf_map_lookup_elem(&routes, &dest_ip);
 
-    if (ifindex) {
-        // 5. Found a route! Redirect to target interface.
+    // 去 ARP 表查MAC
+    unsigned char *target_mac = bpf_map_lookup_elem(&arp_table, &dest_ip);
+
+    if (ifindex && target_mac) {
+        // 5. Found a route & MAC! Redirect with L2 Rewrite.
+        
+        // [MAC Spoofing / L2 Rewrite]
+        // 我们不仅要改方向(redirect)，还要改“信封”上的收件人名字。
+        // 将以太网头的 h_dest 修改为目标 Pod 的真实 MAC。
+        // 这样目标 Pod 收到包后，一看 MAC 是自己的，才会接受。
+        
+        // 注意：这里需要考虑 BPF Helper 对内存操作的限制。
+        // 我们直接使用指针赋值通常是可以的，因为 eth 已经被验证过在 data_end 之前。
+        // 为了稳妥，我们使用 __builtin_memcpy。
+        __builtin_memcpy(eth->h_dest, target_mac, ETH_ALEN);
+        
+        // 优化：最好把源 MAC (h_source) 也改成网关的 MAC，假装是网关发来的。
+        // 但 MVP 阶段如果不改源 MAC，通常也能通（只要目标不校验源 MAC）。
+        // 暂时只改 Dest MAC。
+
         // 查到了！(Hit)
         // bpf_redirect(*ifindex, 0) 的意思是：
         // "别走原本的路线了，立刻、马上把这个包扔给 ifindex 这个网卡！"

@@ -98,3 +98,11 @@ pub fn get_ifindex(ifname: &str) -> Result<u32> {
 
     Ok(index)
 }
+
+pub fn get_mac_address(ifname: &str) -> Result<String> {
+    // Read from /sys/class/net/<ifname>/address
+    let path = format!("/sys/class/net/{}/address", ifname);
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read MAC from {}", path))?;
+    Ok(content.trim().to_string())
+}

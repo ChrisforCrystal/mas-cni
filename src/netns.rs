@@ -1,8 +1,8 @@
 #[cfg(target_os = "linux")]
 use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 #[cfg(target_os = "linux")]
-use nix::sched::{CloneFlags, setns};
+use nix::sched::{setns, CloneFlags};
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
@@ -61,9 +61,13 @@ where
     #[cfg(target_os = "linux")]
     {
         // 1. Save current netns
+        // 保存当前线程的网络命名空间（即宿主机的 Netns）。
+        // 这一步至关重要，因为如果我们切进容器切不回来，后续的 CNI 操作（如写结果、调 IPAM 删除）就会在这个错误的命名空间里执行，导致灾难。
         let current_ns = get_current_netns().context("Failed to get current netns")?;
 
         // 2. Switch to target netns
+        // 打开目标命名空间的文件（通常在 /var/run/netns/ 或者是 /proc/<pid>/ns/net）。
+        // 然后调用 setns() 系统调用，让当前线程“穿越”进容器的网络世界。
         let target_ns = NetNS::open(ns_path)
             .map_err(|e| anyhow!("Failed to open target netns {}: {}", ns_path, e))?;
         target_ns
@@ -71,9 +75,12 @@ where
             .context("Failed to switch to target netns")?;
 
         // 3. Run function
+        // 在容器的命名空间里执行闭包函数。
+        // 这时候执行的 `ip link set eth0 name ...` 都是对容器内的网卡生效。
         let result = func();
 
         // 4. Switch back
+        // 穿越回来。恢复现场。
         current_ns
             .set()
             .context("Failed to switch back to original netns")?;

@@ -117,3 +117,52 @@ pub fn add_route(dest_ip: &str, ifindex: u32) -> Result<()> {
 
     Ok(())
 }
+
+// Update the BPF map "arp_table" with a new entry (IP -> MAC)
+pub fn register_arp(dest_ip: &str, mac_addr: &str) -> Result<()> {
+    // 1. Convert IP to u32 (Big Endian)
+    // Map 的 Key 是目标 IP 地址。
+    // 就像前面 `add_route` 一样，必须转成大端序 (Network Byte Order)，
+    // 才能跟 eBPF 程序里解析出来的 packet header 对应上。
+    let ip: Ipv4Addr = Ipv4Addr::from_str(dest_ip)?;
+    let ip_u32 = u32::from(ip).to_be();
+
+    // 2. Format Key (IP)
+    // 将 u32 拆成 4 个字节的 hex 字符串，例如 "0a 58 00 05"。
+    // bpftool 命令行工具对于 `key hex` 参数要求这种空格分隔的格式。
+    let key_hex = format!(
+        "{:02x} {:02x} {:02x} {:02x}",
+        (ip_u32 >> 24) & 0xff,
+        (ip_u32 >> 16) & 0xff,
+        (ip_u32 >> 8) & 0xff,
+        ip_u32 & 0xff
+    );
+
+    // 3. Format Value (MAC Address)
+    // MAC format: "aa:bb:cc:dd:ee:ff" -> "aa bb cc dd ee ff"
+    // Map 的 Value 是 6 字节的 MAC 地址。
+    // bpftool 同样要求空格分隔的 hex 字节。这就好办了，直接把冒号替换成空格即可。
+    let val_hex = mac_addr.replace(":", " ");
+
+    eprintln!("Rust CNI: Updating ARP map: {} -> {}", dest_ip, mac_addr);
+
+    // 4. Call bpftool
+    // 更新 BPF Map `arp_table`。
+    // 这条记录告诉 eBPF：如果你要发包给 IP `key_hex`，请把以太网头的 DstMAC 改成 `val_hex`。
+    let status = Command::new("bpftool")
+        .args(&["map", "update", "name", "arp_table", "key", "hex"])
+        .args(key_hex.split_whitespace())
+        .args(&["value", "hex"])
+        .args(val_hex.split_whitespace())
+        .status()?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to update ARP map for {} -> {}",
+            dest_ip,
+            mac_addr
+        ));
+    }
+
+    Ok(())
+}
