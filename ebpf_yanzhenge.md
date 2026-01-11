@@ -23,13 +23,37 @@ docker ps --filter "name=kind-control-plane"
 
 使用 Docker 里的 Ubuntu 环境来编译 C 代码，确保能找到 Linux 内核头文件。
 
+````bash
 ```bash
-docker run --rm -v $(pwd):/src -w /src --platform linux/amd64 ubuntu:latest /bin/bash -c \
- "apt-get update && \
-  apt-get install -y clang llvm libbpf-dev linux-libc-dev gcc-multilib && \
-  ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
-  clang -O2 -target bpf -c ebpf/tc_redirect.bpf.c -o ebpf/tc_redirect.o"
-```
+# ==============================================================================
+# eBPF 编译命令 (Cross-Compilation Helper)
+# ------------------------------------------------------------------------------
+# 目的：使用 Docker 作为一个一致的编译环境，将 C 源码编译成 BPF 字节码 (.o)。
+# 难点：我们需要在 MacOS (ARM64) 上操作，但需生成兼容 Linux 内核的 BPF 字节码，
+#      且编译过程中需要引用 Linux 内核头文件 (linux-libc-dev)。
+# ==============================================================================
+docker run --rm \
+    -v $(pwd):/src \
+    -w /src \
+    --platform linux/amd64 \
+    ubuntu:latest \
+    /bin/bash -c \
+    "apt-get update && \
+     # 1. 安装 LLVM/Clang (BPF编译器) 和 Linux 头文件
+     apt-get install -y clang llvm libbpf-dev linux-libc-dev gcc-multilib && \
+     \
+     # 2. 修复头文件路径问题 (Hack)
+     # Clang 有时找不到 <asm/types.h>，因为 Ubuntu 把它们放到了 x86_64-linux-gnu 目录下。
+     # 这里我们手动建个软链，帮编译器找到头文件。
+     ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
+     \
+     # 3. 执行编译
+     # -O2:         必须开启优化 (BPF Verifier 要求)。
+     # -target bpf: 生成 BPF 架构的字节码。
+     clang -O2 -target bpf -c ebpf/tc_redirect.bpf.c -o ebpf/tc_redirect.o"
+````
+
+````
 
 **产物检查**: `ls -l ebpf/tc_redirect.o`
 
@@ -39,7 +63,7 @@ docker run --rm -v $(pwd):/src -w /src --platform linux/amd64 ubuntu:latest /bin
 
 ```bash
 docker run --rm -v $(pwd):/usr/src/mascni -w /usr/src/mascni rust:1.83 cargo build --release
-```
+````
 
 **产物检查**: `ls -l target/release/mascni`
 _(注意：产物在 `target/release/` 下，不是 `target/x86_64-unknown-linux-gnu/`)_
@@ -57,6 +81,12 @@ docker cp ebpf/tc_redirect.o kind-control-plane:/opt/cni/bin/tc_redirect.o
 
 # 3. 赋予执行权限
 docker exec kind-control-plane chmod +x /opt/cni/bin/mascni
+# 3. 赋予执行权限
+docker exec kind-control-plane chmod +x /opt/cni/bin/mascni
+
+# 4. 拷贝配置文件 (关键！)
+# Kubelet 会监控 /etc/cni/net.d/ 目录，并加载字典序第一的配置文件。
+docker cp 10-mascni-new.conf kind-control-plane:/etc/cni/net.d/10-mascni-new.conf
 ```
 
 ## 4. 安装运行时依赖 (Install Runtime Deps)
@@ -90,14 +120,14 @@ kubectl get pod mascni-pod -o wide -w
 等到 Pod 状态变成 `Running`，执行 Ping 测试（Ping 网关）：
 
 ```bash
-kubectl exec mascni-pod -- ping -c 2 10.99.0.1
+kubectl exec mascni-pod -- ping -c 2 10.88.0.1
 ```
 
 **预期输出**:
 
 ```text
-64 bytes from 10.99.0.1: seq=0 ttl=64 time=0.xxx ms
-64 bytes from 10.99.0.1: seq=1 ttl=64 time=0.xxx ms
+64 bytes from 10.88.0.1: seq=0 ttl=64 time=0.xxx ms
+64 bytes from 10.88.0.1: seq=1 ttl=64 time=0.xxx ms
 ```
 
 ### 5.3 深度检查 (可选)
