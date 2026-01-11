@@ -82,10 +82,15 @@ pub fn ip_route_add(dst_cidr: &str, dev_name: &str) -> Result<()> {
 
 pub fn get_ifindex(ifname: &str) -> Result<u32> {
     // Read from /sys/class/net/<ifname>/ifindex
+    // Linux 内核会把每个网卡的信息暴露在 /sys/class/net/ 目录下。
+    // 其中 ifindex 文件就存放了该网卡的数字 ID。
+    // 这种方法比写 C 代码调用 ioctl(SIOCGIFINDEX) 要简单得多，也更 Rust 友好。
     let path = format!("/sys/class/net/{}/ifindex", ifname);
     let content = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read ifindex from {}", path))?;
 
+    // 解析文件内容，去掉末尾换行符，转成 u32。
+    // 例如文件内容是 "15\n"，我们就得到数字 15。
     let index = content
         .trim()
         .parse::<u32>()

@@ -5,19 +5,19 @@ use std::collections::HashMap;
 pub struct PluginConf {
     #[serde(rename = "cniVersion")]
     pub cni_version: String,
-    
+
     pub name: String,
-    
+
     #[serde(rename = "type")]
     pub plugin_type: String,
 
     // Mascni specifics
     #[serde(default = "default_bridge")]
     pub bridge: String,
-    
+
     #[serde(rename = "isGateway", default = "default_true")]
     pub is_gateway: bool,
-    
+
     #[serde(rename = "ipMasq", default = "default_true")]
     pub ip_masq: bool,
 
@@ -28,7 +28,7 @@ pub struct PluginConf {
 pub struct IPAMConf {
     #[serde(rename = "type")]
     pub ipam_type: String,
-    
+
     // Capture other IPAM fields (subnet, routes, etc.) to pass through
     #[serde(flatten)]
     pub other: HashMap<String, serde_json::Value>,

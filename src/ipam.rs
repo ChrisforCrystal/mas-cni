@@ -19,6 +19,15 @@ fn delegate(command: &str, ipam_type: &str, stdin_data: &[u8]) -> Result<String>
     let plugin_path = format!("/opt/cni/bin/{}", ipam_type);
 
     // 2. Prepare command
+    // 这里等价于在 Shell 中执行以下命令（假设 ipam_type 是 "host-local"）：
+    // export CNI_COMMAND=ADD (或者 DEL/CHECK)
+    // export CNI_PATH=/opt/cni/bin
+    // echo '{ "cniVersion": "...", "ipam": { ... } }' | /opt/cni/bin/host-local
+    //
+    // 关键点：
+    // 1. 通过环境变量传参 (CNI_COMMAND)。
+    // 2. 通过 Stdin 管道传入 JSON 配置 (child.stdin)。
+    // 3. 捕获 Stdout 作为返回值 (child.stdout)，里面包含分配到的 IP。
     let mut child = Command::new(&plugin_path)
         .env("CNI_COMMAND", command)
         .env("CNI_PATH", "/opt/cni/bin") // Standard path

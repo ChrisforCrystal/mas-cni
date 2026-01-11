@@ -52,26 +52,37 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
     );
 
     // 2. Call IPAM to get IP (Delegate)
+    // 调用 IPAM 插件（如 host-local）来获取 IP 地址。
+    // CNI 插件通常不自己管理 IP 池，而是“外包”给专门的 IPAM 插件。
     let ipam_result_json = ipam::exec_add(&conf.ipam.ipam_type, raw_config)?;
 
     // Parse IPAM result to find the IP to assign
+    // 解析 IPAM 返回的 JSON 结果，提取我们需要分配给 Pod 的 IP 信息。
     let ipam_res: serde_json::Value = serde_json::from_str(&ipam_result_json)?;
     // Extract IP (e.g. "10.99.0.5/16")
+    // 获取带掩码的 IP 地址字符串，用于配置网卡。
     let ip_addr_cidr = ipam_res["ips"][0]["address"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No IP address found in IPAM result"))?;
     // Extract pure IP without CIDR
+    // 提取纯 IP 地址（不带掩码），用于后续的路由配置或日志打印。
     let ip_addr = ip_addr_cidr.split('/').next().unwrap_or(ip_addr_cidr);
 
     // 3. Create Veth Pair
+    // 创建一对 Veth 虚拟网卡接口。
+    // Veth 总是成对出现，像一根管子的两端：一端在宿主机 (host_veth), 一端稍后放入容器 (temp_container_veth)。
     netlink::ip_link_add_veth(&host_veth_name, &temp_container_veth)?;
 
     // 4. Move container-side veth to Container Netns
+    // 将管子的一端（temp_container_veth）移动到 Pod 的网络命名空间中。
+    // 一旦移动进去，宿主机就看不见这个接口了，它“属于”了那个容器。
     netlink::ip_link_set_ns(&temp_container_veth, &netns_path)?;
 
     // 5. Configure Container Interface (Inside NetNS)
+    // 切换进程的视角进入 Pod 的网络命名空间，进行内部网络配置。
     netns::with_netns(&netns_path, || {
         // a. Rename temp name to CNI_IFNAME (eth0)
+        // 将临时的 veth 名字重命名为 K8s 期望的标准名字（通常是 eth0）。
         let status = std::process::Command::new("ip")
             .args(&["link", "set", &temp_container_veth, "name", &ifname])
             .status()?;
@@ -80,12 +91,16 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
         }
 
         // b. Add IP
+        // 给容器内的 eth0 接口绑定 IP 地址。
         netlink::ip_addr_add(&ifname, ip_addr_cidr)?;
 
         // c. Set UP
+        // 启动容器内的 eth0 接口。
         netlink::ip_link_up(&ifname)?;
 
         // d. Add Default Route
+        // 配置默认路由。告诉容器：“如果你要访问外网，请把包发给网关”。
+        // 网关 IP 是从 IPAM 结果中获取的（例如 10.88.0.1）。
         if let Some(ip_list) = ipam_res["ips"].as_array() {
             if let Some(first_ip) = ip_list.first() {
                 if let Some(gw) = first_ip.get("gateway").and_then(|v| v.as_str()) {
@@ -103,10 +118,15 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
     })?;
 
     // 6. Configure Host Interface (Host Side)
+    // 回到宿主机命名空间，配置管子的另一端。
+    // 首先启动宿主机上的 veth 接口。
     netlink::ip_link_up(&host_veth_name)?;
 
     // 6.1 Assign Gateway IP to Host Veth (so Pod can ping Gateway)
-    // We reuse the Gateway IP from IPAM (e.g. 10.88.0.1) and add it as /32
+    // 给宿主机 Veth 接口绑定网关 IP (例如 10.88.0.1/32)。
+    // 这是一个关键技巧：虽然网关 IP 逻辑上属于整个子网，但我们需要让它在宿主机的这个接口上“存在”，
+    // 这样当 Pod 发起 Ping 网关的请求时，宿主机内核才会响应。
+    // 使用 /32 掩码是为了避免在宿主机上产生非预期的宽范围路由。
     if let Some(ip_list) = ipam_res["ips"].as_array() {
         if let Some(first_ip) = ip_list.first() {
             if let Some(gw) = first_ip.get("gateway").and_then(|v| v.as_str()) {
@@ -124,6 +144,9 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
 
     // 6.5 Add Route to Container IP on Host (Essential for Host <-> Pod comms)
     // ip route add <ContainerIP> dev <HostVeth>
+    // 在宿主机路由表中添加一条指向 Pod IP 的路由。
+    // 告诉宿主机：“如果你要发包给 10.88.0.3 (Pod)，请把包丢进 vethxxxx 这个管子”。
+    // 这是 Host 到 Pod 通信的基础保障（eBPF 的保底）。
     if let Err(e) = netlink::ip_route_add(ip_addr, &host_veth_name) {
         eprintln!("Warn: Failed to add host route: {}", e);
     }
@@ -134,30 +157,30 @@ fn cmd_add(conf: &config::PluginConf, raw_config: &[u8]) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let bpf_obj_path = "/opt/cni/bin/tc_redirect.o";
+        // 1. Attach eBPF Program
+        // 将编译好的 eBPF 程序 (tc_redirect.o) 挂载到宿主机 Veth 接口的 ingress 钩子上。
+        // 这意味着：所有从该 Pod 发出来的包，在进入宿主机网络栈之前，都会先经过我们的 eBPF 程序。
         if let Err(e) = loader::attach_bpf_prog(&host_veth_name, bpf_obj_path) {
             eprintln!("Warn: Failed to attach BPF: {}", e);
             // We continue for now, as eBPF object might not be present in all tests yet
         } else {
             eprintln!("Rust CNI: eBPF attached to {}", host_veth_name);
 
-            // Get IfIndex used for redirect
+            // 2. Update BPF Map (Register Route)
+            // 获取宿主机 Veth 接口的 ifindex（数字 ID，例如 15）。
             match netlink::get_ifindex(&host_veth_name) {
                 Ok(idx) => {
-                    // Add route: <ContainerIP> -> <HostVethIndex>
-                    // Wait, this logic is tricky.
-                    // The map "routes" is shared.
-                    // The key is DestIP. The Value is Target IfIndex.
-                    // Packet FROM host TO container (10.99.0.5):
-                    //   Ingress hook on... wait.
-                    //   Host -> Container traffic usually goes via Routing Table to `veth` interface directly.
-                    //   Container -> Host/Container traffic hits Ingress hook on Host Veth.
-
-                    // So we need to enable Container A to talk to Container B.
-                    // Packet leaves Container A, hits Host Veth A.
-                    // TC Redirect looks up Dest IP (Container B).
-                    // Map should have: <Container B IP> -> <Host Veth B Index>.
-
-                    // So YES, we register OURSELVES into the map so OTHERS can find us.
+                    // 这里的逻辑是“注册自己”：
+                    // 我们要把 <PodIP> -> <HostVethIndex> 的映射关系写入全局 BPF Map。
+                    //
+                    // 为什么？
+                    // 假设 Pod A 想发包给 Pod B (IP: 10.88.0.5)。
+                    // 1. 包从 Pod A 出来，触发 Pod A 对应 Veth 上的 eBPF 程序。
+                    // 2. eBPF 程序查 Map：key=10.88.0.5。
+                    // 3. 如果我们在 Map 里找到了 10.88.0.5 对应的 ifindex 是 20 (即 Pod B 的 Veth)，
+                    //    eBPF 就可以直接把包 redirect 到 index 20。
+                    //
+                    // 所以，每个 Pod 启动时，必须把“我是谁(IP)，我在哪(ifindex)”告诉 Map。
                     if let Err(e) = loader::add_route(ip_addr, idx) {
                         eprintln!("Warn: Failed to update BPF map: {}", e);
                     } else {
